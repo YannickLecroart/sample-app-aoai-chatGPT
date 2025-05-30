@@ -349,36 +349,43 @@ def prepare_model_args(request_body, request_headers):
 
 
 async def promptflow_request(request):
-    try:
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {app_settings.promptflow.api_key}",
-        }
-        # Adding timeout for scenarios where response takes longer to come back
-        logging.debug(f"Setting timeout to {app_settings.promptflow.response_timeout}")
-        async with httpx.AsyncClient(
-            timeout=float(app_settings.promptflow.response_timeout)
-        ) as client:
-            pf_formatted_obj = convert_to_pf_format(
-                request,
-                app_settings.promptflow.request_field_name,
-                app_settings.promptflow.response_field_name
-            )
-            # NOTE: This only support question and chat_history parameters
-            # If you need to add more parameters, you need to modify the request body
-            response = await client.post(
-                app_settings.promptflow.endpoint,
-                json={
-                    app_settings.promptflow.request_field_name: pf_formatted_obj[-1]["inputs"][app_settings.promptflow.request_field_name],
-                    "chat_history": pf_formatted_obj[:-1],
-                },
-                headers=headers,
-            )
-        resp = response.json()
-        resp["id"] = request["messages"][-1]["id"]
-        return resp
-    except Exception as e:
-        logging.error(f"An error occurred while making promptflow_request: {e}")
+    # always stream Prompt Flow responses as SSE
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {app_settings.promptflow.api_key}",
+        "Accept": "text/event-stream",
+    }
+    logging.debug(f"Setting timeout to {app_settings.promptflow.response_timeout}")
+    client = httpx.AsyncClient(timeout=float(app_settings.promptflow.response_timeout))
+
+    # build PF payload
+    pf_formatted = convert_to_pf_format(
+        request,
+        app_settings.promptflow.request_field_name,
+        app_settings.promptflow.response_field_name,
+    )
+    body = {
+        app_settings.promptflow.request_field_name:
+            pf_formatted[-1]["inputs"][app_settings.promptflow.request_field_name],
+        "chat_history": pf_formatted[:-1],
+    }
+
+    from quart import Response
+
+    async def event_generator():
+        async with client.stream(
+            "POST",
+            app_settings.promptflow.endpoint,
+            headers=headers,
+            json=body,
+        ) as resp:
+            async for raw in resp.aiter_lines():
+                # PF should prefix each chunk with "data: {...}"
+                if raw and raw.startswith("data:"):
+                    yield raw + "\n"
+        await client.aclose()
+
+    return Response(event_generator(), mimetype="text/event-stream")
 
 
 async def process_function_call(response):
