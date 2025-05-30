@@ -349,43 +349,48 @@ def prepare_model_args(request_body, request_headers):
 
 
 async def promptflow_request(request):
-    # always stream Prompt Flow responses as SSE
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {app_settings.promptflow.api_key}",
-        "Accept": "text/event-stream",
-    }
-    logging.debug(f"Setting timeout to {app_settings.promptflow.response_timeout}")
-    client = httpx.AsyncClient(timeout=float(app_settings.promptflow.response_timeout))
+    try:
 
-    # build PF payload
-    pf_formatted = convert_to_pf_format(
-        request,
-        app_settings.promptflow.request_field_name,
-        app_settings.promptflow.response_field_name,
-    )
-    body = {
-        app_settings.promptflow.request_field_name:
-            pf_formatted[-1]["inputs"][app_settings.promptflow.request_field_name],
-        "chat_history": pf_formatted[:-1],
-    }
+        # always stream Prompt Flow responses as SSE
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {app_settings.promptflow.api_key}",
+            "Accept": "text/event-stream",
+        }
+        logging.debug(f"Setting timeout to {app_settings.promptflow.response_timeout}")
+        client = httpx.AsyncClient(timeout=float(app_settings.promptflow.response_timeout))
 
-    from quart import Response
+        # build PF payload
+        pf_formatted = convert_to_pf_format(
+            request,
+            app_settings.promptflow.request_field_name,
+            app_settings.promptflow.response_field_name,
+        )
+        body = {
+            app_settings.promptflow.request_field_name:
+                pf_formatted[-1]["inputs"][app_settings.promptflow.request_field_name],
+            "chat_history": pf_formatted[:-1],
+        }
 
-    async def event_generator():
-        async with client.stream(
-            "POST",
-            app_settings.promptflow.endpoint,
-            headers=headers,
-            json=body,
-        ) as resp:
-            async for raw in resp.aiter_lines():
-                # PF should prefix each chunk with "data: {...}"
-                if raw and raw.startswith("data:"):
-                    yield raw + "\n"
-        await client.aclose()
+        from quart import Response
 
-    return Response(event_generator(), mimetype="text/event-stream")
+        async def event_generator():
+            async with client.stream(
+                "POST",
+                app_settings.promptflow.endpoint,
+                headers=headers,
+                json=body,
+            ) as resp:
+                async for raw in resp.aiter_lines():
+                    # PF should prefix each chunk with "data: {...}"
+                    if raw and raw.startswith("data:"):
+                        yield raw + "\n"
+            await client.aclose()
+
+        return Response(event_generator(), mimetype="text/event-stream")
+    
+    except Exception as e:
+        logging.error(f"An error occurred while making promptflow_request: {e}")
 
 
 async def process_function_call(response):
